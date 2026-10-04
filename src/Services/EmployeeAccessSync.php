@@ -22,8 +22,14 @@ use Illuminate\Support\Str;
  *   'user_id'    => int  sync this existing user instead of looking one up (caller already saved it)
  *   'user'       => ['name','email','phone','panel','cost_centre_id','password_hash']  create/update the login user.
  *                   A new user needs password_hash (already hashed). Without 'user', only an existing user is synced.
- *   'companies'  => [company_id, ...]  complete wanted set for user_companies
- *   'cost_centres' => [cost_centre_id, ...]  complete wanted set for user_cost_centres
+ *   'companies'  => [company_id, ...]  wanted set for user_companies
+ *   'cost_centres' => [cost_centre_id, ...]  wanted set for user_cost_centres
+ *   'companies_scope' / 'cost_centres_scope' / 'priorities_scope' => [ids]  optional: the ids the form was able to SHOW
+ *                   (priorities_scope = department ids). Existing rows outside the scope are never removed.
+ *
+ *   Syncing never wipes: it adds what is missing and soft-deletes a row only when its id is inside the scope (or no
+ *   scope is given) and is no longer wanted. Duplicate rows are left alone. A department-level priority row
+ *   (hr_section_id NULL) counts as covering that department's section rows.
  *   'priorities' => [['unit_id'=>..,'department_id'=>..,'section_id'=>..|null], ...]  complete wanted set
  *   'roles'      => ['Role name', ...]  complete wanted set (needs spatie/laravel-permission)
  */
@@ -46,13 +52,13 @@ class EmployeeAccessSync
             if ($userId) {
                 $this->syncLink($employee->id, $userId, $t, $changes);
                 if (array_key_exists('priorities', $access) && $access['priorities'] !== null) {
-                    $this->syncPriorities($userId, $access['priorities'], $t, $changes);
+                    $this->syncPriorities($userId, $access['priorities'], $access['priorities_scope'] ?? null, $t, $changes);
                 }
                 if (array_key_exists('companies', $access) && $access['companies'] !== null) {
-                    $this->syncIdSet($userId, $t['user_companies'], 'company_id', $access['companies'], 'companies', $changes);
+                    $this->syncIdSet($userId, $t['user_companies'], 'company_id', $access['companies'], 'companies', $access['companies_scope'] ?? null, $changes);
                 }
                 if (array_key_exists('cost_centres', $access) && $access['cost_centres'] !== null) {
-                    $this->syncIdSet($userId, $t['user_cost_centres'], 'cost_centre_id', $access['cost_centres'], 'cost_centres', $changes);
+                    $this->syncIdSet($userId, $t['user_cost_centres'], 'cost_centre_id', $access['cost_centres'], 'cost_centres', $access['cost_centres_scope'] ?? null, $changes);
                 }
                 if (array_key_exists('roles', $access) && $access['roles'] !== null) {
                     $this->syncRoles($userId, $access['roles'], $changes);
@@ -166,23 +172,37 @@ class EmployeeAccessSync
         }
     }
 
-    private function syncPriorities(int $userId, array $wanted, array $t, array &$changes): void
+    private function syncPriorities(int $userId, array $wanted, ?array $scope, array $t, array &$changes): void
     {
         $key = fn ($u, $d, $s) => $u.'|'.$d.'|'.($s ?? '');
         $want = [];
+        $wantedDepts = [];
         foreach ($wanted as $p) {
             $want[$key($p['unit_id'], $p['department_id'], $p['section_id'] ?? null)] = $p;
+            $wantedDepts[$p['unit_id'].'|'.$p['department_id']] = true;
         }
 
-        $have = DB::table($t['priorities'])->where('user_id', $userId)->whereNull('deleted_at')->orderBy('id')->get()
-            ->groupBy(fn ($r) => $key($r->hr_unit_id, $r->hr_department_id, $r->hr_section_id));
+        $rows = DB::table($t['priorities'])->where('user_id', $userId)->whereNull('deleted_at')->orderBy('id')->get();
+        $haveKeys = $rows->map(fn ($r) => $key($r->hr_unit_id, $r->hr_department_id, $r->hr_section_id))->unique()->flip();
+        $scope = $scope === null ? null : array_flip(array_map('intval', $scope));
 
-        // every row of an unwanted key goes; of a wanted key only the first row stays (removes duplicates too)
-        $remove = collect();
-        foreach ($have as $k => $rows) {
-            $remove = $remove->merge(isset($want[$k]) ? $rows->skip(1)->pluck('id') : $rows->pluck('id'));
+        // add: a wanted section row is already covered by an existing department-level row (section NULL)
+        $add = [];
+        foreach ($want as $k => $p) {
+            $deptLevel = $key($p['unit_id'], $p['department_id'], null);
+            if (! isset($haveKeys[$k]) && ! isset($haveKeys[$deptLevel])) {
+                $add[$k] = $p;
+            }
         }
-        $add = array_diff_key($want, $have->all());
+
+        // remove: only rows of a department that is no longer wanted at all AND that the form could show
+        $remove = $rows->filter(function ($r) use ($wantedDepts, $scope) {
+            if (isset($wantedDepts[$r->hr_unit_id.'|'.$r->hr_department_id])) {
+                return false;
+            }
+
+            return $scope === null || isset($scope[(int) $r->hr_department_id]);
+        })->pluck('id');
 
         if ($remove->isNotEmpty()) {
             DB::table($t['priorities'])->whereIn('id', $remove->all())->update(['deleted_at' => now()]);
@@ -198,15 +218,19 @@ class EmployeeAccessSync
         }
     }
 
-    /** user_companies / user_cost_centres: diff a user's id set (soft-deletes extras and duplicates, never wipes) */
-    private function syncIdSet(int $userId, string $table, string $column, array $wanted, string $label, array &$changes): void
+    /** user_companies / user_cost_centres: add missing ids; soft-delete an id only when it is in scope and unwanted */
+    private function syncIdSet(int $userId, string $table, string $column, array $wanted, string $label, ?array $scope, array &$changes): void
     {
         $want = array_values(array_unique(array_map('intval', array_filter($wanted, fn ($v) => $v !== null && $v !== ''))));
+        $scopeSet = $scope === null ? null : array_flip(array_map('intval', $scope));
 
         $rows = DB::table($table)->where('user_id', $userId)->whereNull('deleted_at')->orderBy('id')->get()->groupBy($column);
+
         $remove = collect();
         foreach ($rows as $id => $group) {
-            $remove = $remove->merge(in_array((int) $id, $want, true) ? $group->skip(1)->pluck('id') : $group->pluck('id'));
+            if (! in_array((int) $id, $want, true) && ($scopeSet === null || isset($scopeSet[(int) $id]))) {
+                $remove = $remove->merge($group->pluck('id'));
+            }
         }
         $add = array_values(array_diff($want, $rows->keys()->map(fn ($k) => (int) $k)->all()));
 

@@ -33,7 +33,9 @@ app(\Bizzsol\EmployeeSync\Services\EmployeeAccessSync::class)->sync($hrmsEmploye
 ]);
 ```
 
-Upserts basic info, user, link and priorities (diffed, never wiped) in one transaction and returns what changed. Running it twice changes nothing the second time. Omitted keys are left untouched.
+Upserts basic info, user, link, priorities, companies and cost centres in one transaction and returns what changed.
+
+**It never wipes.** It adds what is missing and soft-deletes a row only when that row is inside the optional `*_scope` (the ids the form could show) and is no longer wanted. Rows outside the scope (e.g. under a retired profit centre) are never touched, duplicate rows are left alone, and a department-level priority row (`hr_section_id` NULL) counts as covering that department's sections. Running it twice changes nothing the second time. Omitted keys are left untouched.
 
 ## Install
 
