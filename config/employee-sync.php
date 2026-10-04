@@ -8,6 +8,8 @@ return [
         'employees' => 'hrms_employees',
         'employee_users' => 'hrms_employee_users',
         'priorities' => 'user_priorities',
+        'user_companies' => 'user_companies',
+        'user_cost_centres' => 'user_cost_centres',
     ],
 
     // Reserved for the next step (observers that call EmployeeAccessSync on Eloquent writes).

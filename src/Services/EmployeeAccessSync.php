@@ -20,8 +20,10 @@ use Illuminate\Support\Str;
  * $access (every key optional; null/absent = leave that part untouched):
  *   'basic'      => ['as_doj'=>..,'as_dob'=>..,'as_contact'=>..,'as_ot'=>..,'created_by'=>..]  extra hr_as_basic_info columns
  *   'user_id'    => int  sync this existing user instead of looking one up (caller already saved it)
- *   'user'       => ['name','email','phone','panel','password_hash']  create/update the login user.
+ *   'user'       => ['name','email','phone','panel','cost_centre_id','password_hash']  create/update the login user.
  *                   A new user needs password_hash (already hashed). Without 'user', only an existing user is synced.
+ *   'companies'  => [company_id, ...]  complete wanted set for user_companies
+ *   'cost_centres' => [cost_centre_id, ...]  complete wanted set for user_cost_centres
  *   'priorities' => [['unit_id'=>..,'department_id'=>..,'section_id'=>..|null], ...]  complete wanted set
  *   'roles'      => ['Role name', ...]  complete wanted set (needs spatie/laravel-permission)
  */
@@ -45,6 +47,12 @@ class EmployeeAccessSync
                 $this->syncLink($employee->id, $userId, $t, $changes);
                 if (array_key_exists('priorities', $access) && $access['priorities'] !== null) {
                     $this->syncPriorities($userId, $access['priorities'], $t, $changes);
+                }
+                if (array_key_exists('companies', $access) && $access['companies'] !== null) {
+                    $this->syncIdSet($userId, $t['user_companies'], 'company_id', $access['companies'], 'companies', $changes);
+                }
+                if (array_key_exists('cost_centres', $access) && $access['cost_centres'] !== null) {
+                    $this->syncIdSet($userId, $t['user_cost_centres'], 'cost_centre_id', $access['cost_centres'], 'cost_centres', $changes);
                 }
                 if (array_key_exists('roles', $access) && $access['roles'] !== null) {
                     $this->syncRoles($userId, $access['roles'], $changes);
@@ -97,7 +105,7 @@ class EmployeeAccessSync
         }
 
         $wanted = ['associate_id' => $e->uid, 'hr_as_basic_info_id' => $basicId];
-        foreach (['name', 'email', 'phone', 'panel'] as $k) {
+        foreach (['name', 'email', 'phone', 'panel', 'cost_centre_id'] as $k) {
             if ($input && array_key_exists($k, $input)) {
                 $wanted[$k] = $input[$k];
             }
@@ -187,6 +195,29 @@ class EmployeeAccessSync
         }
         if ($remove->isNotEmpty() || $add) {
             $changes['priorities'] = ['added' => count($add), 'removed' => $remove->count()];
+        }
+    }
+
+    /** user_companies / user_cost_centres: diff a user's id set (soft-deletes extras and duplicates, never wipes) */
+    private function syncIdSet(int $userId, string $table, string $column, array $wanted, string $label, array &$changes): void
+    {
+        $want = array_values(array_unique(array_map('intval', array_filter($wanted, fn ($v) => $v !== null && $v !== ''))));
+
+        $rows = DB::table($table)->where('user_id', $userId)->whereNull('deleted_at')->orderBy('id')->get()->groupBy($column);
+        $remove = collect();
+        foreach ($rows as $id => $group) {
+            $remove = $remove->merge(in_array((int) $id, $want, true) ? $group->skip(1)->pluck('id') : $group->pluck('id'));
+        }
+        $add = array_values(array_diff($want, $rows->keys()->map(fn ($k) => (int) $k)->all()));
+
+        if ($remove->isNotEmpty()) {
+            DB::table($table)->whereIn('id', $remove->all())->update(['deleted_at' => now()]);
+        }
+        foreach ($add as $id) {
+            DB::table($table)->insert(['user_id' => $userId, $column => $id, 'created_at' => now(), 'updated_at' => now()]);
+        }
+        if ($remove->isNotEmpty() || $add) {
+            $changes[$label] = ['added' => count($add), 'removed' => $remove->count()];
         }
     }
 
