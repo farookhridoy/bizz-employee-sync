@@ -69,7 +69,7 @@ class EmployeeAccessSync
 
         $existing = DB::table($t['basic_info'])->where('associate_id', $e->uid)->first();
         if ($existing) {
-            $diff = array_filter($row, fn ($v, $k) => (string) ($existing->{$k} ?? '') !== (string) $v, ARRAY_FILTER_USE_BOTH);
+            $diff = array_filter($row, fn ($v, $k) => ! $this->same($existing->{$k} ?? null, $v), ARRAY_FILTER_USE_BOTH);
             if ($diff) {
                 DB::table($t['basic_info'])->where('id', $existing->id)->update($diff + ['updated_at' => now()]);
                 $changes['basic_info'] = array_keys($diff);
@@ -104,7 +104,7 @@ class EmployeeAccessSync
         }
 
         if ($user) {
-            $diff = array_filter($wanted, fn ($v, $k) => (string) ($user->{$k} ?? '') !== (string) $v, ARRAY_FILTER_USE_BOTH);
+            $diff = array_filter($wanted, fn ($v, $k) => ! $this->same($user->{$k} ?? null, $v), ARRAY_FILTER_USE_BOTH);
             if ($diff) {
                 DB::table($t['users'])->where('id', $user->id)->update($diff + ['updated_at' => now()]);
                 $changes['user'] = array_keys($diff);
@@ -155,14 +155,18 @@ class EmployeeAccessSync
             $want[$key($p['unit_id'], $p['department_id'], $p['section_id'] ?? null)] = $p;
         }
 
-        $have = DB::table($t['priorities'])->where('user_id', $userId)->whereNull('deleted_at')->get()
-            ->keyBy(fn ($r) => $key($r->hr_unit_id, $r->hr_department_id, $r->hr_section_id));
+        $have = DB::table($t['priorities'])->where('user_id', $userId)->whereNull('deleted_at')->orderBy('id')->get()
+            ->groupBy(fn ($r) => $key($r->hr_unit_id, $r->hr_department_id, $r->hr_section_id));
 
-        $remove = $have->diffKeys($want)->pluck('id');
+        // every row of an unwanted key goes; of a wanted key only the first row stays (removes duplicates too)
+        $remove = collect();
+        foreach ($have as $k => $rows) {
+            $remove = $remove->merge(isset($want[$k]) ? $rows->skip(1)->pluck('id') : $rows->pluck('id'));
+        }
         $add = array_diff_key($want, $have->all());
 
         if ($remove->isNotEmpty()) {
-            DB::table($t['priorities'])->whereIn('id', $remove)->update(['deleted_at' => now()]);
+            DB::table($t['priorities'])->whereIn('id', $remove->all())->update(['deleted_at' => now()]);
         }
         foreach ($add as $p) {
             DB::table($t['priorities'])->insert([
@@ -185,6 +189,15 @@ class EmployeeAccessSync
                 $changes['roles'] = $roles;
             }
         }
+    }
+
+    /** string compare, but a bare date ("2024-01-01") equals the same day stored as a datetime */
+    private function same($current, $wanted): bool
+    {
+        $a = (string) $current;
+        $b = $wanted instanceof \DateTimeInterface ? $wanted->format('Y-m-d H:i:s') : (string) $wanted;
+
+        return $a === $b || (strlen($b) === 10 && str_starts_with($a, $b.' '));
     }
 
     /** first/middle/last may be plain text or a {"en":..,"bn":..} translation JSON (HRMS) */
