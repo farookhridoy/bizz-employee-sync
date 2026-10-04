@@ -44,6 +44,8 @@ Upserts basic info, user, link and priorities (diffed, never wiped) in one trans
 
 Config (`employee-sync.php`, publish with `--tag=employee-sync-config`) holds the table names and the `observers` flag reserved for the next step.
 
+Optional `user_id` key: sync that existing user (the caller already saved it) instead of looking one up.
+
 Optional `basic` key: extra `hr_as_basic_info` columns (`as_doj`, `as_dob`, `as_contact`, `as_ot`, `created_by`, ...).
 
 ## Roadmap

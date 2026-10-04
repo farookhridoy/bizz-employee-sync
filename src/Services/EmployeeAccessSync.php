@@ -19,6 +19,7 @@ use Illuminate\Support\Str;
  *
  * $access (every key optional; null/absent = leave that part untouched):
  *   'basic'      => ['as_doj'=>..,'as_dob'=>..,'as_contact'=>..,'as_ot'=>..,'created_by'=>..]  extra hr_as_basic_info columns
+ *   'user_id'    => int  sync this existing user instead of looking one up (caller already saved it)
  *   'user'       => ['name','email','phone','panel','password_hash']  create/update the login user.
  *                   A new user needs password_hash (already hashed). Without 'user', only an existing user is synced.
  *   'priorities' => [['unit_id'=>..,'department_id'=>..,'section_id'=>..|null], ...]  complete wanted set
@@ -38,7 +39,7 @@ class EmployeeAccessSync
 
             $changes = [];
             $basicId = $this->syncBasicInfo($employee, $access['basic'] ?? [], $t, $changes);
-            $userId = $this->syncUser($employee, $basicId, $access['user'] ?? null, $t, $changes);
+            $userId = $this->syncUser($employee, $basicId, $access['user'] ?? null, $access['user_id'] ?? null, $t, $changes);
 
             if ($userId) {
                 $this->syncLink($employee->id, $userId, $t, $changes);
@@ -86,12 +87,14 @@ class EmployeeAccessSync
         return (int) $id;
     }
 
-    private function syncUser(object $e, int $basicId, ?array $input, array $t, array &$changes): ?int
+    private function syncUser(object $e, int $basicId, ?array $input, ?int $explicitUserId, array $t, array &$changes): ?int
     {
-        $user = DB::table($t['employee_users'])->where($t['employee_users'].'.employee_id', $e->id)->whereNull($t['employee_users'].'.deleted_at')
-            ->join($t['users'], $t['users'].'.id', '=', $t['employee_users'].'.user_id')->whereNull($t['users'].'.deleted_at')
-            ->select($t['users'].'.*')->first()
-            ?? DB::table($t['users'])->where('associate_id', $e->uid)->whereNull('deleted_at')->first();
+        if ($explicitUserId) {
+            $user = DB::table($t['users'])->where('id', $explicitUserId)->whereNull('deleted_at')->first()
+                ?? throw new \InvalidArgumentException("users #{$explicitUserId} not found.");
+        } else {
+            $user = $this->findUser($e, $t);
+        }
 
         $wanted = ['associate_id' => $e->uid, 'hr_as_basic_info_id' => $basicId];
         foreach (['name', 'email', 'phone', 'panel'] as $k) {
@@ -124,6 +127,14 @@ class EmployeeAccessSync
         $changes['user'] = 'created';
 
         return (int) DB::table($t['users'])->insertGetId($wanted);
+    }
+
+    private function findUser(object $e, array $t): ?object
+    {
+        return DB::table($t['employee_users'])->where($t['employee_users'].'.employee_id', $e->id)->whereNull($t['employee_users'].'.deleted_at')
+            ->join($t['users'], $t['users'].'.id', '=', $t['employee_users'].'.user_id')->whereNull($t['users'].'.deleted_at')
+            ->select($t['users'].'.*')->first()
+            ?? DB::table($t['users'])->where('associate_id', $e->uid)->whereNull('deleted_at')->first();
     }
 
     /** exactly one active link per employee and per user */
