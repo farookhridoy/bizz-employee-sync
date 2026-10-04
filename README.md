@@ -44,5 +44,7 @@ Upserts basic info, user, link and priorities (diffed, never wiped) in one trans
 
 Config (`employee-sync.php`, publish with `--tag=employee-sync-config`) holds the table names and the `observers` flag reserved for the next step.
 
+Optional `basic` key: extra `hr_as_basic_info` columns (`as_doj`, `as_dob`, `as_contact`, `as_ot`, `created_by`, ...).
+
 ## Roadmap
 2. HRMS `EmployeesController` calls the service. 3. User-admin screens in main/finance/pmd call it. 4. Observers + `DataImport`. 5. Unique indexes once the report is clean.

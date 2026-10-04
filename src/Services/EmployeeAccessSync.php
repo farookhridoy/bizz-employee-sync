@@ -18,6 +18,7 @@ use Illuminate\Support\Str;
  * works from any app (and from seeders) without depending on that app's models.
  *
  * $access (every key optional; null/absent = leave that part untouched):
+ *   'basic'      => ['as_doj'=>..,'as_dob'=>..,'as_contact'=>..,'as_ot'=>..,'created_by'=>..]  extra hr_as_basic_info columns
  *   'user'       => ['name','email','phone','panel','password_hash']  create/update the login user.
  *                   A new user needs password_hash (already hashed). Without 'user', only an existing user is synced.
  *   'priorities' => [['unit_id'=>..,'department_id'=>..,'section_id'=>..|null], ...]  complete wanted set
@@ -36,7 +37,7 @@ class EmployeeAccessSync
             }
 
             $changes = [];
-            $basicId = $this->syncBasicInfo($employee, $t, $changes);
+            $basicId = $this->syncBasicInfo($employee, $access['basic'] ?? [], $t, $changes);
             $userId = $this->syncUser($employee, $basicId, $access['user'] ?? null, $t, $changes);
 
             if ($userId) {
@@ -53,7 +54,7 @@ class EmployeeAccessSync
         });
     }
 
-    private function syncBasicInfo(object $e, array $t, array &$changes): int
+    private function syncBasicInfo(object $e, array $extra, array $t, array &$changes): int
     {
         $row = array_filter([
             'as_name' => $this->displayName($e),
@@ -64,6 +65,7 @@ class EmployeeAccessSync
             'as_section_id' => $e->main_section_id,
             'as_location' => $e->main_location_id,
         ], fn ($v) => $v !== null && $v !== '');
+        $row = array_merge($row, array_filter($extra, fn ($v) => $v !== null));
 
         $existing = DB::table($t['basic_info'])->where('associate_id', $e->uid)->first();
         if ($existing) {
